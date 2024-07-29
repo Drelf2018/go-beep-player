@@ -7,51 +7,83 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+var winmm = windows.NewLazyDLL("winmm.dll")
+
 type Player struct {
-	Major map[int]int
-	BPM   int
+	Major      map[int]int
+	BPM        int
+	Channel    int
+	Instrument int
+	Velocity   int
+	Period     int
+	Notes      []Note
+
+	handle          uintptr
+	midiOutShortMsg *windows.LazyProc
+	playNotes       []playNote
 }
 
 type playNote struct {
-	key      int
-	duration time.Duration
+	begin    uintptr
+	end      uintptr
+	duration int
 }
 
-func (p *Player) Play(channel, instrument, velocity int, notes []Note) {
-	var handle uintptr
-	winmm := windows.NewLazyDLL("winmm.dll")
-	ret, _, _ := winmm.NewProc("midiOutOpen").Call(uintptr(unsafe.Pointer(&handle)), uintptr(0xFFFFFFFF), 0, 0, 0)
-	defer winmm.NewProc("midiOutClose").Call(handle)
+func (p *Player) Call(a uintptr) {
+	p.midiOutShortMsg.Call(p.handle, a)
+}
+
+func (p *Player) Play() {
+	ret, _, _ := winmm.NewProc("midiOutOpen").Call(uintptr(unsafe.Pointer(&p.handle)), uintptr(0xFFFFFFFF), 0, 0, 0)
 	if ret != 0 {
 		return
 	}
-	midiOutShortMsg := winmm.NewProc("midiOutShortMsg")
 
-	channel = channel & 0x0F
-	playList := make([]playNote, 0, len(notes))
-	duration := 60000000 / float64(p.BPM)
+	p.midiOutShortMsg = winmm.NewProc("midiOutShortMsg")
 
-	for _, note := range notes {
+	p.Channel = p.Channel & 0x0F
+	p.playNotes = []playNote{{
+		end: uintptr(0x80 | p.Channel | (0 << 8) | (p.Velocity << 16)),
+	}}
+
+	p.Call(uintptr(0xC0 | p.Channel | (p.Instrument << 8)))
+
+	for _, note := range p.Notes {
 		if !note.Natural && note.Sharp == 0 && p.Major != nil {
 			note.Sharp = p.Major[note.Key]
 		}
-		playList = append(playList, playNote{
-			key:      note.KeyNum(),
-			duration: time.Duration(note.Duration()*duration-5250) * time.Microsecond, // why 5250?
+		key := note.KeyNum()
+		p.playNotes = append(p.playNotes, playNote{
+			begin:    uintptr(0x90 | p.Channel | (key << 8) | (p.Velocity << 16)),
+			end:      uintptr(0x80 | p.Channel | (key << 8) | (p.Velocity << 16)),
+			duration: int(note.Duration() * 60000 / float64(p.BPM*p.Period)),
 		})
 	}
 
-	var msg uint32
-	msg = uint32(0xC0 | channel | (instrument << 8))
-	midiOutShortMsg.Call(handle, uintptr(msg))
+	defer winmm.NewProc("midiOutClose").Call(p.handle)
 
-	for _, note := range playList {
-		msg = uint32(0x90 | channel | (note.key << 8) | (velocity << 16))
-		midiOutShortMsg.Call(handle, uintptr(msg))
+	windows.TimeBeginPeriod(1)
+	defer windows.TimeEndPeriod(1)
 
-		time.Sleep(note.duration)
+	ticker := time.NewTicker(time.Duration(p.Period) * time.Millisecond)
+	defer ticker.Stop()
 
-		msg = uint32(0x80 | channel | (note.key << 8) | (velocity << 16))
-		midiOutShortMsg.Call(handle, uintptr(msg))
+	index := 0
+	usedTick := 0
+	currentTick := 0
+	for range ticker.C {
+		if usedTick == currentTick {
+			index++
+			if index >= len(p.playNotes) {
+				break
+			}
+			go func() {
+				p.Call(p.playNotes[index-1].end)
+				p.Call(p.playNotes[index].begin)
+			}()
+			usedTick = 0
+			currentTick = p.playNotes[index].duration
+		}
+		usedTick++
 	}
 }

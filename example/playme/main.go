@@ -1,13 +1,11 @@
-package example_test
+package main
 
 import (
-	"testing"
-
 	"github.com/Drelf2018/go-beep-player"
 	"github.com/Drelf2018/go-beep-player/example"
 )
 
-func TestHaruhikage(t *testing.T) {
+func main() {
 	player := &beep.Player{
 		Major:      beep.MajorB,
 		BPM:        95,
